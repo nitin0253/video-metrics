@@ -185,46 +185,47 @@ def build_periods(today_ist):
     today = today_ist
 
     # ---- 4 completed weekly buckets (exclude current partial week) ----
+    # W-1 = most recent completed week, W-2 = the week before, etc.
     this_monday = today - timedelta(days=today.weekday())
-    # last completed week ends the Sunday before this Monday
     for i in range(1, 5):
         wk_monday = this_monday - timedelta(days=7 * i)
         wk_sunday = wk_monday + timedelta(days=6)
-        iso_year, iso_week, _ = wk_monday.isocalendar()
         periods.append({
-            "period_type": "weekly",
-            "period_label": f"{iso_year}-W{iso_week:02d}",
+            "period_type": "Week",
+            "period_label": f"W-{i}",
             "sort_order": 1,
             "sort_date": wk_monday.isoformat(),
             "start": datetime.combine(wk_monday, datetime.min.time()),
             "end": datetime.combine(wk_sunday + timedelta(days=1), datetime.min.time()),
         })
 
-    # ---- 4 completed monthly buckets (exclude current partial month) ----
-    first_of_this_month = today.replace(day=1)
-    for i in range(1, 5):
-        m_start = first_of_this_month - relativedelta(months=i)
-        m_end = m_start + relativedelta(months=1)  # exclusive
-        periods.append({
-            "period_type": "monthly",
-            "period_label": m_start.strftime("%Y-%m"),
-            "sort_order": 2,
-            "sort_date": m_start.isoformat(),
-            "start": datetime.combine(m_start, datetime.min.time()),
-            "end": datetime.combine(m_end, datetime.min.time()),
-        })
-
     # ---- MTD (1st of current month .. today inclusive) ----
+    # Placed between weeks and months to match the sheet layout.
+    first_of_this_month = today.replace(day=1)
     mtd_start = first_of_this_month
     mtd_end = today + timedelta(days=1)  # include today fully
     periods.append({
-        "period_type": "mtd",
-        "period_label": first_of_this_month.strftime("%Y-%m") + "-MTD",
-        "sort_order": 3,
+        "period_type": "Month",
+        "period_label": "MTD",
+        "sort_order": 2,
         "sort_date": mtd_start.isoformat(),
         "start": datetime.combine(mtd_start, datetime.min.time()),
         "end": datetime.combine(mtd_end, datetime.min.time()),
     })
+
+    # ---- 4 completed monthly buckets (exclude current partial month) ----
+    # M-1 = most recent completed month, M-2 = the month before, etc.
+    for i in range(1, 5):
+        m_start = first_of_this_month - relativedelta(months=i)
+        m_end = m_start + relativedelta(months=1)  # exclusive
+        periods.append({
+            "period_type": "Month",
+            "period_label": f"M-{i}",
+            "sort_order": 3,
+            "sort_date": m_start.isoformat(),
+            "start": datetime.combine(m_start, datetime.min.time()),
+            "end": datetime.combine(m_end, datetime.min.time()),
+        })
 
     return periods
 
