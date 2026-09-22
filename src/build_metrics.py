@@ -367,19 +367,8 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
                     [r for r in vf_p if r["region"] == k],
                     [r for r in all_p if r["region"] == k],
                 )
-        else:  # rt
-            groups = {}
-            keys = sorted(
-                {(r["team_id"], r["team_name"]) for r in all_p}
-                | {(r["team_id"], r["team_name"]) for r in vf_p},
-                key=lambda x: str(x[0]),
-            )
-            for k in keys:
-                tid = k[0]
-                groups[k] = (
-                    [r for r in vf_p if r["team_id"] == tid],
-                    [r for r in all_p if r["team_id"] == tid],
-                )
+        else:  # rt -- overall per period (NOT per team), same grain as vin
+            groups = {None: (vf_p, all_p)}
 
         for gkey, (vf_g, all_g) in groups.items():
             m = compute_group_metrics(vf_g, all_g)
