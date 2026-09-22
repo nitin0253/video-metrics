@@ -93,9 +93,24 @@ RT_HEADERS = [
 LOG_TAB = "run_log"
 LOG_HEADERS = [
     "run_time", "status", "rows_fetched",
-    "video_vin_rows", "video_region_rows", "video_rt_rows",
+    "video_vin_rows", "video_region_rows", "video_rt_rows", "video_ff_rows",
     "duration_sec", "error",
 ]
+
+# --- video_ff (failure / rejection reasons) ---
+FF_HEADERS = ["period_type", "period", "reason", "count", "pct", "last_updated"]
+FF_TOP_N = 3
+FF_NO_REASON = "(no reason recorded)"
+
+# These three raw reasons are merged into one bucket (matched case-insensitively,
+# trimmed). Extend this set if more image-missing variants appear.
+FF_MERGE_LABEL = "Interior and Exterior Images not available"
+FF_MERGE_SOURCES = {
+    "interior image missing",
+    "exterior images missing",
+    "exterior image missing",
+    "interior and exterior images not available",
+}
 
 # ----------------------------------------------------------------------------
 # Metabase
@@ -361,6 +376,7 @@ def prepare_rows(raw_rows):
             "vin": (str(getv(r, "VIN", "vin")).strip()
                     if getv(r, "VIN", "vin") is not None else None),
             "first_qc": parse_dt(getv(r, "First_QC_Done_Time", "first_qc_done_time")),
+            "rejected_reason": getv(r, "rejected_reason", "Rejected_Reason", "rejection_reason"),
         }
         all_rows.append(norm)
         if norm["vin"] and created is not None:
@@ -450,6 +466,55 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
                 }
                 row.update(m)
                 out_rows.append([row.get(h, 0) for h in RT_HEADERS])
+
+    return out_rows
+
+
+def _canon_reason(raw):
+    """Normalize a rejected_reason: merge image-missing variants, blank -> no-reason."""
+    s = (str(raw).strip() if raw not in (None, "") else "")
+    if not s:
+        return FF_NO_REASON
+    if s.lower() in FF_MERGE_SOURCES:
+        return FF_MERGE_LABEL
+    return s
+
+
+def build_ff_rows(raw_rows, periods, last_updated):
+    """
+    video_ff: rejection-reason breakdown per period.
+    One row per (period, reason) for the TOP FF_TOP_N reasons in that period.
+    count = rejected videos for that reason; pct = count / total created videos
+    in the period * 100. Reasons are merged (image-missing group) before ranking.
+    """
+    _, all_rows_all = prepare_rows(raw_rows)
+
+    def in_period(dt, p):
+        return dt is not None and p["start"] <= dt < p["end"]
+
+    out_rows = []
+    for p in periods:
+        in_rows = [r for r in all_rows_all if in_period(r["created"], p)]
+        total_created = len(in_rows)  # denominator = all created videos in period
+
+        counts = defaultdict(int)
+        for r in in_rows:
+            if str(r.get("verified_status") or "").strip().lower() == "rejected":
+                counts[_canon_reason(r.get("rejected_reason"))] += 1
+
+        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:FF_TOP_N]
+
+        for reason, cnt in ranked:
+            pct = round(cnt / total_created * 100, 2) if total_created else 0
+            row = {
+                "period_type": p["period_type"],
+                "period": p["period_label"],
+                "reason": reason,
+                "count": cnt,
+                "pct": pct,
+                "last_updated": last_updated,
+            }
+            out_rows.append([row.get(h, "") for h in FF_HEADERS])
 
     return out_rows
 
@@ -565,15 +630,18 @@ def main():
         vin_rows = build_tab_rows(raw_rows, periods, "vin", last_updated)
         region_rows = build_tab_rows(raw_rows, periods, "region", last_updated)
         rt_rows = build_tab_rows(raw_rows, periods, "rt", last_updated)
+        ff_rows = build_ff_rows(raw_rows, periods, last_updated)
 
         log["video_vin_rows"] = len(vin_rows)
         log["video_region_rows"] = len(region_rows)
         log["video_rt_rows"] = len(rt_rows)
+        log["video_ff_rows"] = len(ff_rows)
 
         tabs = {
             "video_vin": (VIN_HEADERS, vin_rows),
             "video_region": (REGION_HEADERS, region_rows),
             "video_rt": (RT_HEADERS, rt_rows),
+            "video_ff": (FF_HEADERS, ff_rows),
         }
 
         if args.dry_run:
