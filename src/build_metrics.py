@@ -543,6 +543,12 @@ def main():
         log["rows_fetched"] = len(raw_rows)
         print(f"  {len(raw_rows)} rows")
 
+        # --- DIAGNOSTIC: show the actual column names the API returned ---
+        if raw_rows:
+            print("COLUMN NAMES:", list(raw_rows[0].keys()))
+            print("SAMPLE ROW:", raw_rows[0])
+        # ----------------------------------------------------------------
+
         periods = build_periods(today_ist)
         print(f"periods: {[p['period_label'] for p in periods]}")
 
