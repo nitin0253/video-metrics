@@ -38,7 +38,7 @@ from zoneinfo import ZoneInfo
 # Config
 # ----------------------------------------------------------------------------
 
-SPREADSHEET_ID = "1UdtvpQre__qVTifIYnIWH_D1IKrvV86eLDxkGNyarFM"
+SPREADSHEET_ID = "16vFElbOV8Awd63R6-WlsNdAScWNE18xGUPFkzE0GN7c"
 MODEL1_CARD_ID = 11942
 
 SLA_THRESHOLD_SECONDS = 6 * 3600  # fixed 6h SLA for all VINs
