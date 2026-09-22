@@ -339,18 +339,28 @@ def prepare_rows(raw_rows):
     # group by VIN to find first video and its first_qc_done_time
     by_vin = defaultdict(list)
 
+    def getv(row, *names):
+        """Return the first present, non-empty value among candidate key names."""
+        for n in names:
+            if n in row and row[n] not in (None, ""):
+                return row[n]
+        return None
+
     for r in raw_rows:
-        created = parse_dt(r.get("Created_ON"))
+        # API returns 'Created On' (with a space); tolerate underscore variants too.
+        created = parse_dt(getv(r, "Created On", "Created_ON", "created_on"))
         seg = seg_key(r)
         norm = {
             "created": created,
             "seg": seg,
-            "region": (str(r.get("region")).strip() if r.get("region") not in (None, "") else "Unknown"),
-            "team_id": r.get("Team_ID"),
-            "team_name": r.get("Team_Name"),
-            "verified_status": r.get("verified_status"),
-            "vin": (str(r.get("VIN")).strip() if r.get("VIN") not in (None, "") else None),
-            "first_qc": parse_dt(r.get("First_QC_Done_Time")),
+            "region": (str(getv(r, "region", "Region")).strip()
+                       if getv(r, "region", "Region") is not None else "Unknown"),
+            "team_id": getv(r, "Team_ID", "team_id"),
+            "team_name": getv(r, "Team_Name", "team_name"),
+            "verified_status": getv(r, "verified_status", "Verified_Status"),
+            "vin": (str(getv(r, "VIN", "vin")).strip()
+                    if getv(r, "VIN", "vin") is not None else None),
+            "first_qc": parse_dt(getv(r, "First_QC_Done_Time", "first_qc_done_time")),
         }
         all_rows.append(norm)
         if norm["vin"] and created is not None:
