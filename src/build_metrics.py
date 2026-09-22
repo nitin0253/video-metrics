@@ -239,56 +239,91 @@ def seg_key(row):
     return seg if seg in SEGMENTS else None
 
 
-def compute_group_metrics(vin_first_rows, all_rows):
+METRIC_KEYS = (
+    ["sla_pct", "p99_tat_hrs", "p95_tat_hrs", "fulfillment_pct"]
+    + [f"{seg}_{m}" for seg in ("ent", "mid", "resellers", "smb")
+       for m in ("sla_pct", "p99_tat_hrs", "p95_tat_hrs", "fulfillment_pct")]
+)
+
+
+def _sla_p99_p95(rows):
+    """Return (sla, p99, p95) or (None, None, None) if no rows."""
+    tats = sorted(r["tat_seconds"] for r in rows)
+    if not tats:
+        return None, None, None
+    sla = sum(1 for t in tats if t <= SLA_THRESHOLD_SECONDS) / len(tats) * 100
+    hrs = sorted(t / 3600.0 for t in tats)
+    return round(sla, 2), round(percentile(hrs, 0.99), 2), round(percentile(hrs, 0.95), 2)
+
+
+def _fulfillment(rows):
+    """Return pct or None if no verified/rejected rows."""
+    delivered = denom = 0
+    for r in rows:
+        vs = str(r.get("verified_status") or "").strip().lower()
+        if vs == "verified":
+            delivered += 1
+            denom += 1
+        elif vs == "rejected":
+            denom += 1
+    if denom == 0:
+        return None
+    return round(delivered / denom * 100, 2)
+
+
+def compute_group_metrics_raw(vin_first_rows, all_rows):
     """
-    Given:
-      vin_first_rows : list of first-video-per-VIN rows (for SLA/p99/p95),
-                       each already carrying tat_seconds (>=0).
-      all_rows       : all video rows in this period/group (for fulfillment).
-    Return a dict of metric_name -> value for one output row (metrics only).
+    Compute all metrics for one group. Values are None where the group has
+    no data for that metric (so callers can distinguish 'no data' from 0).
     """
     out = {}
-
-    def sla_p99_p95(rows):
-        tats = sorted(r["tat_seconds"] for r in rows)  # seconds, already >=0
-        if not tats:
-            return 0, 0, 0
-        sla = sum(1 for t in tats if t <= SLA_THRESHOLD_SECONDS) / len(tats) * 100
-        hrs = [t / 3600.0 for t in tats]
-        hrs.sort()
-        p99 = percentile(hrs, 0.99)
-        p95 = percentile(hrs, 0.95)
-        return round(sla, 2), round(p99, 2), round(p95, 2)
-
-    def fulfillment(rows):
-        delivered = 0
-        denom = 0
-        for r in rows:
-            vs = str(r.get("verified_status") or "").strip().lower()
-            if vs == "verified":
-                delivered += 1
-                denom += 1
-            elif vs == "rejected":
-                denom += 1
-        if denom == 0:
-            return 0
-        return round(delivered / denom * 100, 2)
-
-    # overall
-    sla, p99, p95 = sla_p99_p95(vin_first_rows)
+    sla, p99, p95 = _sla_p99_p95(vin_first_rows)
     out["sla_pct"], out["p99_tat_hrs"], out["p95_tat_hrs"] = sla, p99, p95
-    out["fulfillment_pct"] = fulfillment(all_rows)
+    out["fulfillment_pct"] = _fulfillment(all_rows)
 
-    # per segment
     for seg in SEGMENTS.values():
         seg_vin = [r for r in vin_first_rows if r["seg"] == seg]
         seg_all = [r for r in all_rows if r["seg"] == seg]
-        s, a, b = sla_p99_p95(seg_vin)
+        s, a, b = _sla_p99_p95(seg_vin)
         out[f"{seg}_sla_pct"] = s
         out[f"{seg}_p99_tat_hrs"] = a
         out[f"{seg}_p95_tat_hrs"] = b
-        out[f"{seg}_fulfillment_pct"] = fulfillment(seg_all)
+        out[f"{seg}_fulfillment_pct"] = _fulfillment(seg_all)
+    return out
 
+
+def compute_group_metrics(vin_first_rows, all_rows):
+    """Pooled metrics with None->0 for output (used by vin and region tabs)."""
+    raw = compute_group_metrics_raw(vin_first_rows, all_rows)
+    return {k: (0 if v is None else v) for k, v in raw.items()}
+
+
+def compute_macro_avg_metrics(vin_first_rows, all_rows):
+    """
+    Rooftop macro-average (used by video_rt): compute each metric PER rooftop
+    (team_id), then average across rooftops that have data for that metric.
+    Rooftops with no data for a given metric are skipped from its average.
+    """
+    # group this period's rows by team
+    vin_by_team = defaultdict(list)
+    all_by_team = defaultdict(list)
+    for r in vin_first_rows:
+        vin_by_team[r["team_id"]].append(r)
+    for r in all_rows:
+        all_by_team[r["team_id"]].append(r)
+
+    team_ids = set(vin_by_team) | set(all_by_team)
+
+    # per-team raw metrics (None where that team has no data for a metric)
+    per_team = [
+        compute_group_metrics_raw(vin_by_team.get(tid, []), all_by_team.get(tid, []))
+        for tid in team_ids
+    ]
+
+    out = {}
+    for key in METRIC_KEYS:
+        vals = [t[key] for t in per_team if t.get(key) is not None]
+        out[key] = round(sum(vals) / len(vals), 2) if vals else 0
     return out
 
 
@@ -371,7 +406,10 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
             groups = {None: (vf_p, all_p)}
 
         for gkey, (vf_g, all_g) in groups.items():
-            m = compute_group_metrics(vf_g, all_g)
+            if grain == "rt":
+                m = compute_macro_avg_metrics(vf_g, all_g)
+            else:
+                m = compute_group_metrics(vf_g, all_g)
 
             if grain == "vin":
                 row = {
