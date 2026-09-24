@@ -406,6 +406,7 @@ def prepare_rows(raw_rows):
             "first_qc": parse_dt(getv(r, "First_QC_Done_Time", "first_qc_done_time")),
             "rejected_reason": getv(r, "rejected_reason", "Rejected_Reason", "rejection_reason"),
             "video_id": getv(r, "Video_ID", "video_id"),
+            "crm_status": getv(r, "CRM_Status", "crm_status"),
         }
         all_rows.append(norm)
         if norm["vin"] and created is not None:
@@ -467,8 +468,10 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
                 m = compute_group_metrics(vf_g, all_g)
 
             # distinct video counts for this group/period (not deduped to VIN)
+            # total_videos = distinct video_ids whose crm_status is qc_done
             total_vids = len({r["video_id"] for r in all_g
-                              if r.get("video_id") not in (None, "")})
+                              if r.get("video_id") not in (None, "")
+                              and str(r.get("crm_status") or "").strip().lower() == "qc_done"})
             delivered_vids = len({r["video_id"] for r in all_g
                                   if r.get("video_id") not in (None, "")
                                   and str(r.get("verified_status") or "").strip().lower() == "verified"})
