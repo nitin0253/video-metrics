@@ -130,19 +130,44 @@ def metabase_session(base_url, user, password):
     return resp.json()["id"]
 
 
-def fetch_card_rows(base_url, session_id, card_id):
-    """Run a saved card and return list[dict] keyed by column display name."""
-    resp = requests.post(
-        f"{base_url}/api/card/{card_id}/query/json",
-        headers={"X-Metabase-Session": session_id},
-        timeout=600,
+def fetch_card_rows(base_url, session_id, card_id, max_attempts=4):
+    """
+    Run a saved card and return list[dict] keyed by column display name.
+
+    The card is heavy (~80k rows) and a gateway in front of Metabase can return
+    a 504 Gateway Time-out when the DB is momentarily busy. Retry with backoff so
+    a transient slow window doesn't fail the whole run.
+    """
+    import time as _time
+
+    last_err = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            resp = requests.post(
+                f"{base_url}/api/card/{card_id}/query/json",
+                headers={"X-Metabase-Session": session_id},
+                timeout=600,
+            )
+        except requests.exceptions.RequestException as e:
+            last_err = f"request error: {e}"
+        else:
+            if resp.status_code == 200:
+                return resp.json()
+            # 502/503/504 are transient gateway/DB-busy errors -> retry.
+            last_err = f"{resp.status_code}: {resp.text[:200]}"
+            if resp.status_code not in (429, 500, 502, 503, 504):
+                # non-transient (e.g. 401/403/404) -> fail fast, no point retrying
+                raise RuntimeError(f"Card {card_id} query failed ({last_err})")
+
+        if attempt < max_attempts:
+            wait = 30 * attempt  # 30s, 60s, 90s
+            print(f"  fetch attempt {attempt} failed ({last_err}); "
+                  f"retrying in {wait}s ...")
+            _time.sleep(wait)
+
+    raise RuntimeError(
+        f"Card {card_id} query failed after {max_attempts} attempts ({last_err})"
     )
-    if resp.status_code != 200:
-        raise RuntimeError(
-            f"Card {card_id} query failed ({resp.status_code}): {resp.text[:300]}"
-        )
-    # /query/json returns a list of row objects keyed by column name.
-    return resp.json()
 
 
 # ----------------------------------------------------------------------------
