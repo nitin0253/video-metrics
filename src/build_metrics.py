@@ -56,6 +56,7 @@ SEGMENTS = {
 # Column order per tab (must match the sheet headers exactly).
 VIN_HEADERS = [
     "period_type", "period",
+    "total_videos", "delivered_videos",
     "sla_pct", "p99_tat_hrs", "p95_tat_hrs",
     "ent_sla_pct", "ent_p99_tat_hrs", "ent_p95_tat_hrs",
     "mid_sla_pct", "mid_p99_tat_hrs", "mid_p95_tat_hrs",
@@ -68,6 +69,7 @@ VIN_HEADERS = [
 
 REGION_HEADERS = [
     "period_type", "period", "region",
+    "total_videos", "delivered_videos",
     "sla_pct", "p99_tat_hrs", "p95_tat_hrs",
     "ent_sla_pct", "ent_p99_tat_hrs", "ent_p95_tat_hrs",
     "mid_sla_pct", "mid_p99_tat_hrs", "mid_p95_tat_hrs",
@@ -80,6 +82,7 @@ REGION_HEADERS = [
 
 RT_HEADERS = [
     "sort_order", "sort_date", "period_type", "period",
+    "total_videos", "delivered_videos",
     "sla_pct", "p99_tat_hrs", "p95_tat_hrs",
     "ent_sla_pct", "ent_p99_tat_hrs", "ent_p95_tat_hrs",
     "mid_sla_pct", "mid_p99_tat_hrs", "mid_p95_tat_hrs",
@@ -402,6 +405,7 @@ def prepare_rows(raw_rows):
                     if getv(r, "VIN", "vin") is not None else None),
             "first_qc": parse_dt(getv(r, "First_QC_Done_Time", "first_qc_done_time")),
             "rejected_reason": getv(r, "rejected_reason", "Rejected_Reason", "rejection_reason"),
+            "video_id": getv(r, "Video_ID", "video_id"),
         }
         all_rows.append(norm)
         if norm["vin"] and created is not None:
@@ -462,12 +466,22 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
             else:
                 m = compute_group_metrics(vf_g, all_g)
 
+            # distinct video counts for this group/period (not deduped to VIN)
+            total_vids = len({r["video_id"] for r in all_g
+                              if r.get("video_id") not in (None, "")})
+            delivered_vids = len({r["video_id"] for r in all_g
+                                  if r.get("video_id") not in (None, "")
+                                  and str(r.get("verified_status") or "").strip().lower() == "verified"})
+            vid_counts = {"total_videos": total_vids,
+                          "delivered_videos": delivered_vids}
+
             if grain == "vin":
                 row = {
                     "period_type": p["period_type"],
                     "period": p["period_label"],
                     "last_updated": last_updated,
                 }
+                row.update(vid_counts)
                 row.update(m)
                 out_rows.append([row.get(h, 0) for h in VIN_HEADERS])
 
@@ -478,6 +492,7 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
                     "region": gkey,
                     "last_updated": last_updated,
                 }
+                row.update(vid_counts)
                 row.update(m)
                 out_rows.append([row.get(h, 0) for h in REGION_HEADERS])
 
@@ -489,6 +504,7 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
                     "period": p["period_label"],
                     "last_updated": last_updated,
                 }
+                row.update(vid_counts)
                 row.update(m)
                 out_rows.append([row.get(h, 0) for h in RT_HEADERS])
 
