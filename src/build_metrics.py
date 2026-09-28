@@ -515,13 +515,18 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
 
 
 def _canon_reason(raw):
-    """Normalize a rejected_reason: merge image-missing variants, blank -> no-reason."""
-    s = (str(raw).strip() if raw not in (None, "") else "")
+    """
+    Normalize a rejected_reason: collapse whitespace, merge image-missing
+    variants, blank -> no-reason. Returns (group_key, display_label); the key
+    is lowercased so case/spacing variants of one reason land in one bucket.
+    """
+    s = " ".join(str(raw).split()) if raw not in (None, "") else ""
     if not s:
-        return FF_NO_REASON
-    if s.lower() in FF_MERGE_SOURCES:
-        return FF_MERGE_LABEL
-    return s
+        return FF_NO_REASON.lower(), FF_NO_REASON
+    key = s.lower()
+    if key in FF_MERGE_SOURCES:
+        return FF_MERGE_LABEL.lower(), FF_MERGE_LABEL
+    return key, s
 
 
 def build_ff_rows(raw_rows, periods, last_updated):
@@ -542,11 +547,17 @@ def build_ff_rows(raw_rows, periods, last_updated):
         total_created = len(in_rows)  # denominator = all created videos in period
 
         counts = defaultdict(int)
+        variants = defaultdict(lambda: defaultdict(int))  # key -> display -> n
         for r in in_rows:
             if str(r.get("verified_status") or "").strip().lower() == "rejected":
-                counts[_canon_reason(r.get("rejected_reason"))] += 1
+                key, label = _canon_reason(r.get("rejected_reason"))
+                counts[key] += 1
+                variants[key][label] += 1
 
-        ranked = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:FF_TOP_N]
+        # display each bucket with its most common spelling
+        labelled = {max(variants[k].items(), key=lambda kv: (kv[1], kv[0]))[0]: n
+                    for k, n in counts.items()}
+        ranked = sorted(labelled.items(), key=lambda kv: (-kv[1], kv[0]))[:FF_TOP_N]
 
         for reason, cnt in ranked:
             pct = round(cnt / total_created * 100, 2) if total_created else 0
