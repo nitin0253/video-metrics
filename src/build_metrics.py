@@ -13,6 +13,11 @@ Metric definitions (all from model 1, card 11942):
                       (First_QC_Done_Time - Created_ON) in hours.
                       SLA met = TAT <= 6h (21600s). VINs without a
                       First_QC_Done_Time are skipped from these three.
+  tech_sla_pct / tech_p99_tat_hrs (video_vin only)
+                   -> same one-row-per-VIN idea, but TAT is
+                      (Video_Processing_Done_Time - Created_ON) of the
+                      first video. SLA met = tech TAT <= 6h. VINs without
+                      a Video_Processing_Done_Time are skipped.
   fulfillment_pct  -> over ALL model-1 video rows in the period:
                       verified / (verified + rejected) * 100.
                       Other verified_status values are ignored.
@@ -42,6 +47,7 @@ SPREADSHEET_ID = "16vFElbOV8Awd63R6-WlsNdAScWNE18xGUPFkzE0GN7c"
 MODEL1_CARD_ID = 11942
 
 SLA_THRESHOLD_SECONDS = 6 * 3600  # fixed 6h SLA for all VINs
+TECH_SLA_THRESHOLD_SECONDS = 6 * 3600  # tech processing SLA (video_vin)
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -58,6 +64,7 @@ VIN_HEADERS = [
     "period_type", "period",
     "total_videos", "delivered_videos",
     "sla_pct", "p99_tat_hrs", "p95_tat_hrs",
+    "tech_sla_pct", "tech_p99_tat_hrs",
     "ent_sla_pct", "ent_p99_tat_hrs", "ent_p95_tat_hrs",
     "mid_sla_pct", "mid_p99_tat_hrs", "mid_p95_tat_hrs",
     "resellers_sla_pct", "resellers_p99_tat_hrs", "resellers_p95_tat_hrs",
@@ -289,12 +296,14 @@ METRIC_KEYS = (
 )
 
 
-def _sla_p99_p95(rows):
+def _sla_p99_p95(rows, threshold=None):
     """Return (sla, p99, p95) or (None, None, None) if no rows."""
+    if threshold is None:
+        threshold = SLA_THRESHOLD_SECONDS
     tats = sorted(r["tat_seconds"] for r in rows)
     if not tats:
         return None, None, None
-    sla = sum(1 for t in tats if t <= SLA_THRESHOLD_SECONDS) / len(tats) * 100
+    sla = sum(1 for t in tats if t <= threshold) / len(tats) * 100
     hrs = sorted(t / 3600.0 for t in tats)
     return round(sla, 2), round(percentile(hrs, 0.99), 2), round(percentile(hrs, 0.95), 2)
 
@@ -407,6 +416,9 @@ def prepare_rows(raw_rows):
             "rejected_reason": getv(r, "rejected_reason", "Rejected_Reason", "rejection_reason"),
             "video_id": getv(r, "Video_ID", "video_id"),
             "crm_status": getv(r, "CRM_Status", "crm_status"),
+            "proc_done": parse_dt(getv(r, "Video_Processing_Done_Time",
+                                       "Video Processing Done Time",
+                                       "video_processing_done_time")),
         }
         all_rows.append(norm)
         if norm["vin"] and created is not None:
@@ -431,12 +443,38 @@ def prepare_rows(raw_rows):
     return vin_first, all_rows
 
 
+def prepare_tech_rows(all_rows):
+    """
+    One row per VIN (first video = earliest Created_ON) with tat_seconds =
+    Video_Processing_Done_Time - Created_ON. Video_Processing_Done_Time is
+    per-VIN in the model, like First_QC_Done_Time. VINs without it are skipped.
+    """
+    by_vin = defaultdict(list)
+    for r in all_rows:
+        if r["vin"] and r["created"] is not None:
+            by_vin[r["vin"]].append(r)
+
+    tech_first = []
+    for rows in by_vin.values():
+        first = min(rows, key=lambda x: x["created"])
+        if first["proc_done"] is None:
+            continue
+        tat = (first["proc_done"] - first["created"]).total_seconds()
+        if tat < 0:
+            continue
+        tf = dict(first)
+        tf["tat_seconds"] = tat
+        tech_first.append(tf)
+    return tech_first
+
+
 def build_tab_rows(raw_rows, periods, grain, last_updated):
     """
     grain in {"vin","region","rt"}.
     Returns list of output rows (list of cell values) matching that tab's headers.
     """
     vin_first_all, all_rows_all = prepare_rows(raw_rows)
+    tech_first_all = prepare_tech_rows(all_rows_all) if grain == "vin" else []
 
     def in_period(dt, p):
         return dt is not None and p["start"] <= dt < p["end"]
@@ -479,10 +517,14 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
                           "delivered_videos": delivered_vids}
 
             if grain == "vin":
+                tech_p = [r for r in tech_first_all if in_period(r["created"], p)]
+                t_sla, t_p99, _ = _sla_p99_p95(tech_p, TECH_SLA_THRESHOLD_SECONDS)
                 row = {
                     "period_type": p["period_type"],
                     "period": p["period_label"],
                     "last_updated": last_updated,
+                    "tech_sla_pct": t_sla or 0,
+                    "tech_p99_tat_hrs": t_p99 or 0,
                 }
                 row.update(vid_counts)
                 row.update(m)
