@@ -10,12 +10,12 @@ Tabs populated (clear + full repopulate each run):
 Metric definitions (all from model 1, card 11942):
   SLA / p99 / p95  -> computed on ONE row per VIN = the first video
                       (earliest Created_ON on that VIN). TAT is
-                      (First_QC_Done_Time - Created_ON) in hours.
+                      (First_QC_Done_Time - First_Created_ON) in hours.
                       SLA met = TAT <= 6h (21600s). VINs without a
                       First_QC_Done_Time are skipped from these three.
   tech_sla_pct / tech_p99_tat_hrs (video_vin only)
                    -> same one-row-per-VIN idea, but TAT is
-                      (Video_Processing_Done_Time - Created_ON) of the
+                      (First_Processing_Done_Time - First_Created_ON) of the
                       first video. SLA met = tech TAT <= 6h. VINs without
                       a Video_Processing_Done_Time are skipped.
   fulfillment_pct  -> over ALL model-1 video rows in the period:
@@ -416,9 +416,13 @@ def prepare_rows(raw_rows):
             "rejected_reason": getv(r, "rejected_reason", "Rejected_Reason", "rejection_reason"),
             "video_id": getv(r, "Video_ID", "video_id"),
             "crm_status": getv(r, "CRM_Status", "crm_status"),
-            "proc_done": parse_dt(getv(r, "Video_Processing_Done_Time",
-                                       "Video Processing Done Time",
-                                       "video_processing_done_time")),
+            "proc_done": parse_dt(getv(r, "First_Processing_Done_Time",
+                                       "First Processing Done Time",
+                                       "Video_Processing_Done_Time",
+                                       "Video Processing Done Time")),
+            # created_on of the per-VIN first video (the one behind the First_* times)
+            "first_created": parse_dt(getv(r, "First_Created_ON", "First Created On",
+                                           "First_Created_On", "first_created_on")),
         }
         all_rows.append(norm)
         if norm["vin"] and created is not None:
@@ -432,7 +436,10 @@ def prepare_rows(raw_rows):
         # skip VINs without a first-qc-done time
         if fqc is None:
             continue
-        tat = (fqc - first["created"]).total_seconds()
+        # TAT starts at the first video's created_on; fall back to this row's
+        # Created_ON if the model doesn't provide First_Created_ON.
+        start = first["first_created"] or first["created"]
+        tat = (fqc - start).total_seconds()
         if tat < 0:
             # by design shouldn't happen for the first video; guard anyway
             continue
@@ -446,8 +453,9 @@ def prepare_rows(raw_rows):
 def prepare_tech_rows(all_rows):
     """
     One row per VIN (first video = earliest Created_ON) with tat_seconds =
-    Video_Processing_Done_Time - Created_ON. Video_Processing_Done_Time is
-    per-VIN in the model, like First_QC_Done_Time. VINs without it are skipped.
+    First_Processing_Done_Time - First_Created_ON (both per-VIN in the model,
+    from the same first video as First_QC_Done_Time). VINs without a
+    processing done time are skipped.
     """
     by_vin = defaultdict(list)
     for r in all_rows:
@@ -459,7 +467,8 @@ def prepare_tech_rows(all_rows):
         first = min(rows, key=lambda x: x["created"])
         if first["proc_done"] is None:
             continue
-        tat = (first["proc_done"] - first["created"]).total_seconds()
+        start = first["first_created"] or first["created"]
+        tat = (first["proc_done"] - start).total_seconds()
         if tat < 0:
             continue
         tf = dict(first)
