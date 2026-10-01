@@ -137,10 +137,23 @@ def fetch_card_rows(base_url, session_id, card_id, max_attempts=4):
             last_err = f"request error: {e}"
         else:
             if resp.status_code == 200:
-                return resp.json()
+                try:
+                    data = resp.json()
+                except ValueError:
+                    data = None
+                if isinstance(data, list):
+                    return data
+                # Metabase can return 200 with an error object instead of rows
+                # (e.g. the query timed out or failed in the DB) -> retry.
+                if isinstance(data, dict):
+                    detail = data.get("error") or data.get("message") or data.get("status")
+                else:
+                    detail = resp.text[:200]
+                last_err = f"200 but no rows returned ({str(detail)[:300]})"
+            else:
+                last_err = f"{resp.status_code}: {resp.text[:200]}"
             # 502/503/504 are transient gateway/DB-busy errors -> retry.
-            last_err = f"{resp.status_code}: {resp.text[:200]}"
-            if resp.status_code not in (429, 500, 502, 503, 504):
+            if resp.status_code not in (200, 429, 500, 502, 503, 504):
                 # non-transient (e.g. 401/403/404) -> fail fast, no point retrying
                 raise RuntimeError(f"Card {card_id} query failed ({last_err})")
 
