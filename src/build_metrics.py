@@ -7,25 +7,19 @@ Tabs populated (clear + full repopulate each run):
   - video_region  : per region  x period bucket
   - video_rt      : per team_id x period bucket (+ sort_order, sort_date)
 
-Metric definitions (all from model 1, card 11942):
-  SLA / p99 / p95  -> computed on ONE row per VIN = the first video
-                      (earliest Created_ON on that VIN). TAT is
-                      (First_QC_Done_Time - First_Created_ON) in hours.
-                      SLA met = TAT <= 6h (21600s). VINs without a
-                      First_QC_Done_Time are skipped from these three.
-  tech_sla_pct / tech_p99_tat_hrs (video_vin only)
-                   -> same one-row-per-VIN idea, but TAT is
-                      (First_Processing_Done_Time - First_Created_ON) of the
-                      first video. SLA met = tech TAT <= 6h. VINs without
-                      a Video_Processing_Done_Time are skipped.
-  fulfillment_pct  -> over ALL model-1 video rows in the period:
-                      verified / (verified + rejected) * 100.
-                      Other verified_status values are ignored.
-  Segments         -> Ent / Mid / Resellers / SMB, matched case-insensitively
-                      on customer_segment.
-  Period bucketing -> by Created_ON, ISO week (Mon-Sun).
-                      4 completed weekly + 4 monthly + 1 MTD = 9 buckets.
-                      Empty period/segment cell -> 0.
+Metric definitions (all from model 1, card 11942; one row per ACTIVE video):
+  QC  sla / p99 / p95   -> TAT = qc_updated_on (qc_done time) - Created_ON.
+                           Rows without a qc_done time are skipped.
+  tech sla / p99 / p95  -> TAT = Processing_Done_Time - Created_ON.
+                           Rows without a processing done time are skipped.
+  SLA met               -> TAT <= 6h (21600s), for both QC and tech.
+  fulfillment_pct       -> verified / (verified + rejected) * 100 over all rows.
+                           Other verified_status values are ignored.
+  Segments              -> Ent / Mid / Resellers / SMB, matched case-insensitively
+                           on customer_segment.
+  Period bucketing      -> by the active video's Created_ON, ISO week (Mon-Sun).
+                           4 completed weekly + 4 monthly + 1 MTD = 9 buckets.
+                           Empty period/segment cell -> 0.
 """
 
 import os
@@ -46,8 +40,7 @@ from zoneinfo import ZoneInfo
 SPREADSHEET_ID = "16vFElbOV8Awd63R6-WlsNdAScWNE18xGUPFkzE0GN7c"
 MODEL1_CARD_ID = 11942
 
-SLA_THRESHOLD_SECONDS = 6 * 3600  # fixed 6h SLA for all VINs
-TECH_SLA_THRESHOLD_SECONDS = 6 * 3600  # tech processing SLA (video_vin)
+SLA_THRESHOLD_SECONDS = 6 * 3600  # fixed 6h SLA, QC and tech TAT
 
 IST = ZoneInfo("Asia/Kolkata")
 
@@ -60,45 +53,27 @@ SEGMENTS = {
 }
 
 # Column order per tab (must match the sheet headers exactly).
-VIN_HEADERS = [
-    "period_type", "period",
-    "total_videos", "delivered_videos",
-    "sla_pct", "p99_tat_hrs", "p95_tat_hrs",
-    "tech_sla_pct", "tech_p99_tat_hrs",
-    "ent_sla_pct", "ent_p99_tat_hrs", "ent_p95_tat_hrs",
-    "mid_sla_pct", "mid_p99_tat_hrs", "mid_p95_tat_hrs",
-    "resellers_sla_pct", "resellers_p99_tat_hrs", "resellers_p95_tat_hrs",
-    "smb_sla_pct", "smb_p99_tat_hrs", "smb_p95_tat_hrs",
-    "fulfillment_pct", "ent_fulfillment_pct", "mid_fulfillment_pct",
-    "resellers_fulfillment_pct", "smb_fulfillment_pct",
-    "last_updated",
-]
+# Per scope: QC sla/p99/p95, then tech sla/p99/p95.
+TAT_METRICS = ["sla_pct", "p99_tat_hrs", "p95_tat_hrs",
+               "tech_sla_pct", "tech_p99_tat_hrs", "tech_p95_tat_hrs"]
+SEG_PREFIXES = ("ent", "mid", "resellers", "smb")
 
-REGION_HEADERS = [
-    "period_type", "period", "region",
-    "total_videos", "delivered_videos",
-    "sla_pct", "p99_tat_hrs", "p95_tat_hrs",
-    "ent_sla_pct", "ent_p99_tat_hrs", "ent_p95_tat_hrs",
-    "mid_sla_pct", "mid_p99_tat_hrs", "mid_p95_tat_hrs",
-    "resellers_sla_pct", "resellers_p99_tat_hrs", "resellers_p95_tat_hrs",
-    "smb_sla_pct", "smb_p99_tat_hrs", "smb_p95_tat_hrs",
-    "fulfillment_pct", "ent_fulfillment_pct", "mid_fulfillment_pct",
-    "resellers_fulfillment_pct", "smb_fulfillment_pct",
-    "last_updated",
-]
+METRIC_HEADERS = (
+    TAT_METRICS
+    + [f"{seg}_{m}" for seg in SEG_PREFIXES for m in TAT_METRICS]
+    + ["fulfillment_pct"]
+    + [f"{seg}_fulfillment_pct" for seg in SEG_PREFIXES]
+)
 
-RT_HEADERS = [
-    "sort_order", "sort_date", "period_type", "period",
-    "total_videos", "delivered_videos",
-    "sla_pct", "p99_tat_hrs", "p95_tat_hrs",
-    "ent_sla_pct", "ent_p99_tat_hrs", "ent_p95_tat_hrs",
-    "mid_sla_pct", "mid_p99_tat_hrs", "mid_p95_tat_hrs",
-    "resellers_sla_pct", "resellers_p99_tat_hrs", "resellers_p95_tat_hrs",
-    "smb_sla_pct", "smb_p99_tat_hrs", "smb_p95_tat_hrs",
-    "fulfillment_pct", "ent_fulfillment_pct", "mid_fulfillment_pct",
-    "resellers_fulfillment_pct", "smb_fulfillment_pct",
-    "last_updated",
-]
+VIN_HEADERS = (["period_type", "period", "total_videos", "delivered_videos"]
+               + METRIC_HEADERS + ["last_updated"])
+
+REGION_HEADERS = (["period_type", "period", "region", "total_videos", "delivered_videos"]
+                  + METRIC_HEADERS + ["last_updated"])
+
+RT_HEADERS = (["sort_order", "sort_date", "period_type", "period",
+               "total_videos", "delivered_videos"]
+              + METRIC_HEADERS + ["last_updated"])
 
 LOG_TAB = "run_log"
 LOG_HEADERS = [
@@ -289,22 +264,16 @@ def seg_key(row):
     return seg if seg in SEGMENTS else None
 
 
-METRIC_KEYS = (
-    ["sla_pct", "p99_tat_hrs", "p95_tat_hrs", "fulfillment_pct"]
-    + [f"{seg}_{m}" for seg in ("ent", "mid", "resellers", "smb")
-       for m in ("sla_pct", "p99_tat_hrs", "p95_tat_hrs", "fulfillment_pct")]
-)
+METRIC_KEYS = METRIC_HEADERS
 
 
-def _sla_p99_p95(rows, threshold=None):
-    """Return (sla, p99, p95) or (None, None, None) if no rows."""
-    if threshold is None:
-        threshold = SLA_THRESHOLD_SECONDS
-    tats = sorted(r["tat_seconds"] for r in rows)
+def _sla_p99_p95(tats):
+    """tats: TAT seconds. Return (sla, p99, p95) or (None, None, None) if empty."""
+    tats = sorted(tats)
     if not tats:
         return None, None, None
-    sla = sum(1 for t in tats if t <= threshold) / len(tats) * 100
-    hrs = sorted(t / 3600.0 for t in tats)
+    sla = sum(1 for t in tats if t <= SLA_THRESHOLD_SECONDS) / len(tats) * 100
+    hrs = [t / 3600.0 for t in tats]
     return round(sla, 2), round(percentile(hrs, 0.99), 2), round(percentile(hrs, 0.95), 2)
 
 
@@ -323,54 +292,47 @@ def _fulfillment(rows):
     return round(delivered / denom * 100, 2)
 
 
-def compute_group_metrics_raw(vin_first_rows, all_rows):
-    """
-    Compute all metrics for one group. Values are None where the group has
-    no data for that metric (so callers can distinguish 'no data' from 0).
-    """
+def _tat_block(rows, prefix=""):
+    """QC + tech sla/p99/p95 for these rows, keyed with an optional prefix."""
     out = {}
-    sla, p99, p95 = _sla_p99_p95(vin_first_rows)
-    out["sla_pct"], out["p99_tat_hrs"], out["p95_tat_hrs"] = sla, p99, p95
-    out["fulfillment_pct"] = _fulfillment(all_rows)
-
-    for seg in SEGMENTS.values():
-        seg_vin = [r for r in vin_first_rows if r["seg"] == seg]
-        seg_all = [r for r in all_rows if r["seg"] == seg]
-        s, a, b = _sla_p99_p95(seg_vin)
-        out[f"{seg}_sla_pct"] = s
-        out[f"{seg}_p99_tat_hrs"] = a
-        out[f"{seg}_p95_tat_hrs"] = b
-        out[f"{seg}_fulfillment_pct"] = _fulfillment(seg_all)
+    qc = _sla_p99_p95([r["qc_tat"] for r in rows if r["qc_tat"] is not None])
+    tech = _sla_p99_p95([r["tech_tat"] for r in rows if r["tech_tat"] is not None])
+    for name, val in zip(TAT_METRICS, qc + tech):
+        out[prefix + name] = val
     return out
 
 
-def compute_group_metrics(vin_first_rows, all_rows):
+def compute_group_metrics_raw(rows):
+    """
+    Compute all metrics for one group of active-video rows. Values are None
+    where the group has no data for that metric ('no data' vs 0).
+    """
+    out = _tat_block(rows)
+    out["fulfillment_pct"] = _fulfillment(rows)
+    for seg in SEGMENTS.values():
+        seg_rows = [r for r in rows if r["seg"] == seg]
+        out.update(_tat_block(seg_rows, f"{seg}_"))
+        out[f"{seg}_fulfillment_pct"] = _fulfillment(seg_rows)
+    return out
+
+
+def compute_group_metrics(rows):
     """Pooled metrics with None->0 for output (used by vin and region tabs)."""
-    raw = compute_group_metrics_raw(vin_first_rows, all_rows)
+    raw = compute_group_metrics_raw(rows)
     return {k: (0 if v is None else v) for k, v in raw.items()}
 
 
-def compute_macro_avg_metrics(vin_first_rows, all_rows):
+def compute_macro_avg_metrics(rows):
     """
     Rooftop macro-average (used by video_rt): compute each metric PER rooftop
     (team_id), then average across rooftops that have data for that metric.
     Rooftops with no data for a given metric are skipped from its average.
     """
-    # group this period's rows by team
-    vin_by_team = defaultdict(list)
-    all_by_team = defaultdict(list)
-    for r in vin_first_rows:
-        vin_by_team[r["team_id"]].append(r)
-    for r in all_rows:
-        all_by_team[r["team_id"]].append(r)
+    by_team = defaultdict(list)
+    for r in rows:
+        by_team[r["team_id"]].append(r)
 
-    team_ids = set(vin_by_team) | set(all_by_team)
-
-    # per-team raw metrics (None where that team has no data for a metric)
-    per_team = [
-        compute_group_metrics_raw(vin_by_team.get(tid, []), all_by_team.get(tid, []))
-        for tid in team_ids
-    ]
+    per_team = [compute_group_metrics_raw(team_rows) for team_rows in by_team.values()]
 
     out = {}
     for key in METRIC_KEYS:
@@ -381,16 +343,13 @@ def compute_macro_avg_metrics(vin_first_rows, all_rows):
 
 def prepare_rows(raw_rows):
     """
-    Normalize raw model-1 rows into a compact internal form and split into:
-      - vin_first : one row per VIN (first video, with non-negative tat_seconds)
-      - all_rows  : every row (for fulfillment)
-    Each internal row carries: created (datetime), seg, region, team_id,
-    team_name, verified_status, vin, tat_seconds (vin_first only).
+    Normalize raw model-1 rows (one per active video) into a compact form.
+    Each row carries: created, seg, region, team_id, team_name,
+    verified_status, vin, rejected_reason, video_id, crm_status, and
+      qc_tat   = qc_updated_on - Created_ON          (seconds, or None)
+      tech_tat = Processing_Done_Time - Created_ON   (seconds, or None)
+    Negative or missing TATs are None, so the row is skipped for that metric.
     """
-    all_rows = []
-    # group by VIN to find first video and its first_qc_done_time
-    by_vin = defaultdict(list)
-
     def getv(row, *names):
         """Return the first present, non-empty value among candidate key names."""
         for n in names:
@@ -398,13 +357,22 @@ def prepare_rows(raw_rows):
                 return row[n]
         return None
 
+    def tat(end, start):
+        if end is None or start is None:
+            return None
+        secs = (end - start).total_seconds()
+        return secs if secs >= 0 else None
+
+    all_rows = []
     for r in raw_rows:
-        # API returns 'Created On' (with a space); tolerate underscore variants too.
+        # API may return display names ('Created On'); tolerate both forms.
         created = parse_dt(getv(r, "Created On", "Created_ON", "created_on"))
-        seg = seg_key(r)
-        norm = {
+        qc_done = parse_dt(getv(r, "qc_updated_on", "Qc Updated On", "QC Updated On"))
+        proc_done = parse_dt(getv(r, "Processing_Done_Time", "Processing Done Time",
+                                  "processing_done_time"))
+        all_rows.append({
             "created": created,
-            "seg": seg,
+            "seg": seg_key(r),
             "region": (str(getv(r, "region", "Region")).strip()
                        if getv(r, "region", "Region") is not None else "Unknown"),
             "team_id": getv(r, "Team_ID", "team_id"),
@@ -412,69 +380,13 @@ def prepare_rows(raw_rows):
             "verified_status": getv(r, "verified_status", "Verified_Status"),
             "vin": (str(getv(r, "VIN", "vin")).strip()
                     if getv(r, "VIN", "vin") is not None else None),
-            "first_qc": parse_dt(getv(r, "First_QC_Done_Time", "first_qc_done_time")),
             "rejected_reason": getv(r, "rejected_reason", "Rejected_Reason", "rejection_reason"),
             "video_id": getv(r, "Video_ID", "video_id"),
             "crm_status": getv(r, "CRM_Status", "crm_status"),
-            "proc_done": parse_dt(getv(r, "First_Processing_Done_Time",
-                                       "First Processing Done Time",
-                                       "Video_Processing_Done_Time",
-                                       "Video Processing Done Time")),
-            # created_on of the per-VIN first video (the one behind the First_* times)
-            "first_created": parse_dt(getv(r, "First_Created_ON", "First Created On",
-                                           "First_Created_On", "first_created_on")),
-        }
-        all_rows.append(norm)
-        if norm["vin"] and created is not None:
-            by_vin[norm["vin"]].append(norm)
-
-    # one row per VIN = earliest Created_ON; tat vs that VIN's First_QC_Done_Time
-    vin_first = []
-    for vin, rows in by_vin.items():
-        first = min(rows, key=lambda x: x["created"])
-        fqc = first["first_qc"]
-        # skip VINs without a first-qc-done time
-        if fqc is None:
-            continue
-        # TAT starts at the first video's created_on; fall back to this row's
-        # Created_ON if the model doesn't provide First_Created_ON.
-        start = first["first_created"] or first["created"]
-        tat = (fqc - start).total_seconds()
-        if tat < 0:
-            # by design shouldn't happen for the first video; guard anyway
-            continue
-        vf = dict(first)
-        vf["tat_seconds"] = tat
-        vin_first.append(vf)
-
-    return vin_first, all_rows
-
-
-def prepare_tech_rows(all_rows):
-    """
-    One row per VIN (first video = earliest Created_ON) with tat_seconds =
-    First_Processing_Done_Time - First_Created_ON (both per-VIN in the model,
-    from the same first video as First_QC_Done_Time). VINs without a
-    processing done time are skipped.
-    """
-    by_vin = defaultdict(list)
-    for r in all_rows:
-        if r["vin"] and r["created"] is not None:
-            by_vin[r["vin"]].append(r)
-
-    tech_first = []
-    for rows in by_vin.values():
-        first = min(rows, key=lambda x: x["created"])
-        if first["proc_done"] is None:
-            continue
-        start = first["first_created"] or first["created"]
-        tat = (first["proc_done"] - start).total_seconds()
-        if tat < 0:
-            continue
-        tf = dict(first)
-        tf["tat_seconds"] = tat
-        tech_first.append(tf)
-    return tech_first
+            "qc_tat": tat(qc_done, created),
+            "tech_tat": tat(proc_done, created),
+        })
+    return all_rows
 
 
 def build_tab_rows(raw_rows, periods, grain, last_updated):
@@ -482,8 +394,7 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
     grain in {"vin","region","rt"}.
     Returns list of output rows (list of cell values) matching that tab's headers.
     """
-    vin_first_all, all_rows_all = prepare_rows(raw_rows)
-    tech_first_all = prepare_tech_rows(all_rows_all) if grain == "vin" else []
+    all_rows_all = prepare_rows(raw_rows)
 
     def in_period(dt, p):
         return dt is not None and p["start"] <= dt < p["end"]
@@ -491,28 +402,22 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
     out_rows = []
 
     for p in periods:
-        # rows falling in this period
-        vf_p = [r for r in vin_first_all if in_period(r["created"], p)]
+        # rows falling in this period (by the active video's Created_ON)
         all_p = [r for r in all_rows_all if in_period(r["created"], p)]
 
-        if grain == "vin":
-            groups = {None: (vf_p, all_p)}
-        elif grain == "region":
-            groups = {}
-            keys = sorted({r["region"] for r in all_p} | {r["region"] for r in vf_p})
-            for k in keys:
-                groups[k] = (
-                    [r for r in vf_p if r["region"] == k],
-                    [r for r in all_p if r["region"] == k],
-                )
-        else:  # rt -- overall per period (NOT per team), same grain as vin
-            groups = {None: (vf_p, all_p)}
+        if grain == "region":
+            groups = defaultdict(list)
+            for r in all_p:
+                groups[r["region"]].append(r)
+            groups = dict(sorted(groups.items()))
+        else:  # vin / rt -- overall per period (rt is a rooftop macro-average)
+            groups = {None: all_p}
 
-        for gkey, (vf_g, all_g) in groups.items():
+        for gkey, all_g in groups.items():
             if grain == "rt":
-                m = compute_macro_avg_metrics(vf_g, all_g)
+                m = compute_macro_avg_metrics(all_g)
             else:
-                m = compute_group_metrics(vf_g, all_g)
+                m = compute_group_metrics(all_g)
 
             # distinct video counts for this group/period (not deduped to VIN)
             # total_videos = distinct video_ids whose crm_status is qc_done
@@ -526,14 +431,10 @@ def build_tab_rows(raw_rows, periods, grain, last_updated):
                           "delivered_videos": delivered_vids}
 
             if grain == "vin":
-                tech_p = [r for r in tech_first_all if in_period(r["created"], p)]
-                t_sla, t_p99, _ = _sla_p99_p95(tech_p, TECH_SLA_THRESHOLD_SECONDS)
                 row = {
                     "period_type": p["period_type"],
                     "period": p["period_label"],
                     "last_updated": last_updated,
-                    "tech_sla_pct": t_sla or 0,
-                    "tech_p99_tat_hrs": t_p99 or 0,
                 }
                 row.update(vid_counts)
                 row.update(m)
@@ -587,7 +488,7 @@ def build_ff_rows(raw_rows, periods, last_updated):
     count = rejected videos for that reason; pct = count / total created videos
     in the period * 100. Reasons are merged (image-missing group) before ranking.
     """
-    _, all_rows_all = prepare_rows(raw_rows)
+    all_rows_all = prepare_rows(raw_rows)
 
     def in_period(dt, p):
         return dt is not None and p["start"] <= dt < p["end"]
