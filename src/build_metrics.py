@@ -13,7 +13,8 @@ Metric definitions (all from model 1, card 11942; one row per ACTIVE video):
   tech sla / p99 / p95  -> TAT = Processing_Done_Time - Created_ON.
                            Rows without a processing done time are skipped.
   SLA met               -> TAT <= 6h (21600s), for both QC and tech.
-  fulfillment_pct       -> verified / (verified + rejected) * 100 over all rows.
+  fulfillment_pct       -> verified / (verified + rejected + QC-pending) * 100
+                           over all rows; QC-pending = no qc_done time yet.
                            Other verified_status values are ignored.
   Segments              -> Ent / Mid / Resellers / SMB, matched case-insensitively
                            on customer_segment.
@@ -291,14 +292,17 @@ def _sla_p99_p95(tats):
 
 
 def _fulfillment(rows):
-    """Return pct or None if no verified/rejected rows."""
+    """
+    verified / (verified + rejected + QC-pending) * 100, or None if the
+    denominator is empty. QC-pending = no qc_done time yet.
+    """
     delivered = denom = 0
     for r in rows:
         vs = str(r.get("verified_status") or "").strip().lower()
         if vs == "verified":
             delivered += 1
             denom += 1
-        elif vs == "rejected":
+        elif vs == "rejected" or r.get("qc_pending"):
             denom += 1
     if denom == 0:
         return None
@@ -397,6 +401,7 @@ def prepare_rows(raw_rows):
             "video_id": getv(r, "Video_ID", "video_id"),
             "crm_status": getv(r, "CRM_Status", "crm_status"),
             "qc_tat": tat(qc_done, created),
+            "qc_pending": qc_done is None,
             "tech_tat": tat(proc_done, created),
         })
     return all_rows
