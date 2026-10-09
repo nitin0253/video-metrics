@@ -9,7 +9,9 @@ Tabs populated (clear + full repopulate each run):
 
 Metric definitions (all from model 1, card 11942; one row per ACTIVE video):
   QC  sla / p99 / p95   -> TAT = qc_updated_on (qc_done time) - Created_ON.
-                           Rows without a qc_done time are skipped.
+                           sla_pct = TAT <= 6h / (videos with a TAT + QC-pending
+                           videos); pending videos count as not within SLA.
+                           p99/p95 skip rows without a qc_done time.
   tech sla / p99 / p95  -> TAT = Processing_Done_Time - Created_ON.
                            Rows without a processing done time are skipped.
   SLA met               -> TAT <= 6h (21600s), for both QC and tech.
@@ -280,12 +282,18 @@ def seg_key(row):
 METRIC_KEYS = METRIC_HEADERS
 
 
-def _sla_p99_p95(tats):
-    """tats: TAT seconds. Return (sla, p99, p95) or (None, None, None) if empty."""
+def _sla_p99_p95(tats, pending=0):
+    """
+    tats: TAT seconds. pending: videos with no TAT yet that still count in the
+    SLA denominator (as not within SLA). p99/p95 use tats only.
+    Return (sla, p99, p95) or (None, None, None) if there is nothing to measure.
+    """
     tats = sorted(tats)
-    if not tats:
+    if not tats and not pending:
         return None, None, None
-    sla = sum(1 for t in tats if t <= SLA_THRESHOLD_SECONDS) / len(tats) * 100
+    sla = sum(1 for t in tats if t <= SLA_THRESHOLD_SECONDS) / (len(tats) + pending) * 100
+    if not tats:
+        return round(sla, 2), None, None
     hrs = [t / 3600.0 for t in tats]
     return round(sla, 2), round(percentile(hrs, 0.99), 2), round(percentile(hrs, 0.95), 2)
 
@@ -308,7 +316,9 @@ def _fulfillment(rows):
 def _tat_block(rows, prefix=""):
     """QC + tech sla/p99/p95 for these rows, keyed with an optional prefix."""
     out = {}
-    qc = _sla_p99_p95([r["qc_tat"] for r in rows if r["qc_tat"] is not None])
+    # QC SLA denominator includes QC-pending videos (no qc_done time yet)
+    qc = _sla_p99_p95([r["qc_tat"] for r in rows if r["qc_tat"] is not None],
+                      pending=sum(1 for r in rows if r["qc_pending"]))
     tech = _sla_p99_p95([r["tech_tat"] for r in rows if r["tech_tat"] is not None])
     for name, val in zip(TAT_METRICS, qc + tech):
         out[prefix + name] = val
@@ -397,6 +407,7 @@ def prepare_rows(raw_rows):
             "video_id": getv(r, "Video_ID", "video_id"),
             "crm_status": getv(r, "CRM_Status", "crm_status"),
             "qc_tat": tat(qc_done, created),
+            "qc_pending": qc_done is None,
             "tech_tat": tat(proc_done, created),
         })
     return all_rows
