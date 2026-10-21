@@ -102,16 +102,19 @@ METRIC_HEADERS = (
 COUNT_METRICS = ["sla_checked", "sla_breached", "tat_measured", "tat_over_sla"]
 COUNT_HEADERS = (COUNT_METRICS
                  + [f"{seg}_{m}" for seg in SEG_PREFIXES for m in COUNT_METRICS])
+# Per-segment Total / Delivered behind fulfillment_pct, so the dashboard's fulfilment
+# tooltip follows the segment chips (same names as the images tabs: ent_total_videos ...)
+SEG_VID_HEADERS = [f"{seg}_{m}" for seg in SEG_PREFIXES for m in ("total_videos", "delivered_videos")]
 
 VIN_HEADERS = (["period_type", "period", "total_videos", "delivered_videos"]
-               + METRIC_HEADERS + COUNT_HEADERS + ["last_updated"])
+               + METRIC_HEADERS + COUNT_HEADERS + SEG_VID_HEADERS + ["last_updated"])
 
 REGION_HEADERS = (["period_type", "period", "region", "total_videos", "delivered_videos"]
-                  + METRIC_HEADERS + COUNT_HEADERS + ["last_updated"])
+                  + METRIC_HEADERS + COUNT_HEADERS + SEG_VID_HEADERS + ["last_updated"])
 
 RT_HEADERS = (["sort_order", "sort_date", "period_type", "period",
                "total_videos", "delivered_videos"]
-              + METRIC_HEADERS + COUNT_HEADERS + ["last_updated"])
+              + METRIC_HEADERS + COUNT_HEADERS + SEG_VID_HEADERS + ["last_updated"])
 
 LOG_TAB = "run_log"
 LOG_HEADERS = [
@@ -654,6 +657,10 @@ def build_tab_rows(raw_rows, periods, grain, last_updated, prepared=None):
             delivered_vids = sum(1 for r in all_g if r["delivered"])
             vid_counts = {"total_videos": total_vids,
                           "delivered_videos": delivered_vids}
+            for seg in SEG_PREFIXES:
+                seg_g = [r for r in all_g if r["seg"] == seg]
+                vid_counts[f"{seg}_total_videos"] = sum(1 for r in seg_g if r["in_pop"])
+                vid_counts[f"{seg}_delivered_videos"] = sum(1 for r in seg_g if r["delivered"])
 
             if grain == "vin":
                 row = {
