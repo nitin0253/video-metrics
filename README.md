@@ -37,6 +37,9 @@ Each tab holds **9** buckets per grain: 4 completed weekly + 4 completed monthly
 | `video_vin` | overall | 9 rows |
 | `video_region` | per `region` | 9 × regions |
 | `video_rt` | per `Team_ID` | 9 × teams, plus `sort_order` (weekly=1, monthly=2, mtd=3) and `sort_date` (period start) |
+| `video_ff` | overall | one row per (period, reason); each row carries overall `count`/`pct` **and** `ent_count`/`ent_pct`, `mid_*`, `resellers_*`, `smb_*` so the dashboard's segment chip rescopes the card by picking a different column pair - each pct is over its own scope's row count. |
+| `video_ff_region` | per `region` | `video_ff` sliced per region: one row per (period, region, reason). Follows the dashboard's region chip when a single region is selected. |
+| `video_ff_byregion` | per `region_set` | `video_ff` sliced per region subset: one row per (period, region_set, reason). Same `region_set` key as `video_vin_byregion` / `video_rt_byregion`, so a multi-region chip combo looks the card up the same way. |
 
 Each metric tab is **cleared and fully repopulated** every run.
 

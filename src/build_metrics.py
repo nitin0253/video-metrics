@@ -3,9 +3,15 @@
 Build video delivery metrics from Metabase model 1 and populate a Google Sheet.
 
 Tabs populated (clear + full repopulate each run):
-  - video_vin     : overall, one row per period bucket
-  - video_region  : per region  x period bucket
-  - video_rt      : per team_id x period bucket (+ sort_order, sort_date)
+  - video_vin           : overall, one row per period bucket
+  - video_region        : per region  x period bucket
+  - video_rt            : per team_id x period bucket (+ sort_order, sort_date)
+  - video_ff            : rejection-reason breakdown per period, with
+                          segment-prefixed count / pct columns for the
+                          dashboard's segment chips.
+  - video_ff_region     : video_ff sliced per region x period x reason.
+  - video_ff_byregion   : video_ff sliced per region_set x period x reason,
+                          same key the dashboard builds from its region chips.
 
 Metric definitions (all from model 1, card 11942; one row per ACTIVE video, Live rooftops
 only - rows from rooftops that aren't Live are dropped, see LIVE_ROOFTOPS_SQL):
@@ -124,7 +130,19 @@ LOG_HEADERS = [
 ]
 
 # --- video_ff (failure / rejection reasons) ---
-FF_HEADERS = ["period_type", "period", "reason", "count", "pct", "last_updated"]
+# count / pct are the overall scope. Segment-prefixed count / pct let the
+# dashboard's segment chips rescope the breakdown without recomputing: pick
+# ent_count / ent_pct instead of count / pct, and the Fulfilment-failure-reasons
+# card shows the Ent-only breakdown. Same denominator rule as before, scoped per
+# segment (ent_pct = ent_rejected / ent_rows * 100).
+FF_SEG_METRICS = ["count", "pct"]
+FF_BASE_COLS = ["reason", "count", "pct"] + [f"{seg}_{m}" for seg in SEG_PREFIXES
+                                              for m in FF_SEG_METRICS]
+FF_HEADERS = ["period_type", "period"] + FF_BASE_COLS + ["last_updated"]
+# Region slices for the region chip, same shape as video_region.
+FF_REGION_HEADERS = ["period_type", "period", "region"] + FF_BASE_COLS + ["last_updated"]
+# region_set slices for multi-region chip combos, same shape as video_vin_byregion.
+FF_BYREGION_HEADERS = ["period_type", "period", "region_set"] + FF_BASE_COLS + ["last_updated"]
 FF_NO_REASON = "(no reason recorded)"
 
 # These three raw reasons are merged into one bucket (matched case-insensitively,
@@ -741,15 +759,91 @@ def _canon_reason(raw):
     return key, s
 
 
-def build_ff_rows(raw_rows, periods, last_updated):
+def _ff_scope(rows):
+    """
+    Count rejection reasons on one scope's rows.
+    Returns (counts {key -> n}, variants {key -> {label -> n}}, denominator).
+    denominator = len(rows), i.e. all created videos in that scope - same rule
+    the overall video_ff has used since the top-3 cap was lifted.
+    """
+    counts = defaultdict(int)
+    variants = defaultdict(lambda: defaultdict(int))
+    for r in rows:
+        if str(r.get("verified_status") or "").strip().lower() == "rejected":
+            key, label = _canon_reason(r.get("rejected_reason"))
+            counts[key] += 1
+            variants[key][label] += 1
+    return counts, variants, len(rows)
+
+
+def _ff_label_for(key, scopes):
+    """Pick a display label for one reason key: use the overall scope's most
+    common spelling; fall back to any segment / region scope that saw it."""
+    for _, variants, _ in scopes:
+        v = variants.get(key)
+        if v:
+            return max(v.items(), key=lambda kv: (kv[1], kv[0]))[0]
+    return key
+
+
+def _ff_period_rows(scope_rows, p, extra_cols, last_updated, headers):
+    """
+    Build one block of video_ff rows for a single (period, scope).
+    scope_rows: rows already filtered to the scope (overall / region / region_set).
+    extra_cols: columns that locate the scope in the sheet, e.g. {'region': 'EMEA'}.
+    headers: the tab's header list (FF_HEADERS / FF_REGION_HEADERS / FF_BYREGION_HEADERS).
+
+    One row per reason seen in the overall scope OR any segment scope within
+    scope_rows - so a reason that only shows up for one segment still gets a row
+    (its overall count is 0, its segment count isn't). Overall count ranks the
+    rows; segment pcts are each over that segment's own denominator so the chips
+    don't need to recompute anything.
+    """
+    overall = _ff_scope(scope_rows)
+    seg_scopes = {seg: _ff_scope([r for r in scope_rows if r["seg"] == seg])
+                  for seg in SEG_PREFIXES}
+
+    ov_counts, _, ov_total = overall
+    all_keys = set(ov_counts)
+    for seg in SEG_PREFIXES:
+        all_keys |= set(seg_scopes[seg][0])
+
+    scopes_for_label = [overall] + [seg_scopes[seg] for seg in SEG_PREFIXES]
+
+    def rank_key(k):
+        return (-ov_counts.get(k, 0), _ff_label_for(k, scopes_for_label).lower())
+
+    out = []
+    for key in sorted(all_keys, key=rank_key):
+        label = _ff_label_for(key, scopes_for_label)
+        cnt = ov_counts.get(key, 0)
+        row = {
+            "period_type": p["period_type"],
+            "period": p["period_label"],
+            "reason": label,
+            "count": cnt,
+            "pct": round(cnt / ov_total * 100, 2) if ov_total else 0,
+            "last_updated": last_updated,
+        }
+        row.update(extra_cols)
+        for seg in SEG_PREFIXES:
+            seg_cnt, _, seg_total = seg_scopes[seg]
+            c = seg_cnt.get(key, 0)
+            row[f"{seg}_count"] = c
+            row[f"{seg}_pct"] = round(c / seg_total * 100, 2) if seg_total else 0
+        out.append([row.get(h, 0) for h in headers])
+    return out
+
+
+def build_ff_rows(raw_rows, periods, last_updated, prepared=None):
     """
     video_ff: rejection-reason breakdown per period.
-    One row per (period, reason) for every reason seen in that period, ordered
-    by count desc. count = rejected videos for that reason;
-    pct = count / total created videos in the period * 100. Reasons are merged
-    (image-missing group) before counting.
+    One row per (period, reason) across the overall scope + every segment it
+    appears in, ranked by overall count desc. Segment-prefixed columns let the
+    dashboard rescope the card without recomputing (ent_pct is Ent-only).
+    Reasons are merged (image-missing group) before counting.
     """
-    all_rows_all = prepare_rows(raw_rows)
+    all_rows_all = prepared if prepared is not None else prepare_rows(raw_rows)
 
     def in_period(dt, p):
         return dt is not None and p["start"] <= dt < p["end"]
@@ -757,33 +851,55 @@ def build_ff_rows(raw_rows, periods, last_updated):
     out_rows = []
     for p in periods:
         in_rows = [r for r in all_rows_all if in_period(r["created"], p)]
-        total_created = len(in_rows)  # denominator = all created videos in period
+        out_rows.extend(_ff_period_rows(in_rows, p, {}, last_updated, FF_HEADERS))
+    return out_rows
 
-        counts = defaultdict(int)
-        variants = defaultdict(lambda: defaultdict(int))  # key -> display -> n
-        for r in in_rows:
-            if str(r.get("verified_status") or "").strip().lower() == "rejected":
-                key, label = _canon_reason(r.get("rejected_reason"))
-                counts[key] += 1
-                variants[key][label] += 1
 
-        # display each bucket with its most common spelling
-        labelled = {max(variants[k].items(), key=lambda kv: (kv[1], kv[0]))[0]: n
-                    for k, n in counts.items()}
-        ranked = sorted(labelled.items(), key=lambda kv: (-kv[1], kv[0]))
+def build_ff_region_rows(raw_rows, periods, last_updated, prepared=None):
+    """
+    video_ff_region: one row per (period, region, reason). Same column shape as
+    video_ff plus a region column, so the dashboard's region chip can look up a
+    region-scoped reason breakdown.
+    """
+    all_rows_all = prepared if prepared is not None else prepare_rows(raw_rows)
 
-        for reason, cnt in ranked:
-            pct = round(cnt / total_created * 100, 2) if total_created else 0
-            row = {
-                "period_type": p["period_type"],
-                "period": p["period_label"],
-                "reason": reason,
-                "count": cnt,
-                "pct": pct,
-                "last_updated": last_updated,
-            }
-            out_rows.append([row.get(h, "") for h in FF_HEADERS])
+    def in_period(dt, p):
+        return dt is not None and p["start"] <= dt < p["end"]
 
+    regions = sorted({r["region"] for r in all_rows_all})
+    out_rows = []
+    for p in periods:
+        in_rows = [r for r in all_rows_all if in_period(r["created"], p)]
+        for region in regions:
+            region_rows = [r for r in in_rows if r["region"] == region]
+            out_rows.extend(_ff_period_rows(region_rows, p, {"region": region},
+                                            last_updated, FF_REGION_HEADERS))
+    return out_rows
+
+
+def build_ff_byregion_rows(raw_rows, periods, last_updated, prepared=None):
+    """
+    video_ff_byregion: one row per (period, region_set, reason). region_set is
+    the sorted region names of a non-trivial subset (not empty, not all), same
+    key the dashboard builds from its region chips - matches video_vin_byregion /
+    video_rt_byregion so the Fulfilment-failure-reasons card follows the chip
+    selection exactly.
+    """
+    all_rows_all = prepared if prepared is not None else prepare_rows(raw_rows)
+
+    def in_period(dt, p):
+        return dt is not None and p["start"] <= dt < p["end"]
+
+    regions = sorted({r["region"] for r in all_rows_all})
+    out_rows = []
+    for p in periods:
+        in_rows = [r for r in all_rows_all if in_period(r["created"], p)]
+        for mask in range(1, (1 << len(regions)) - 1):
+            subset = [reg for i, reg in enumerate(regions) if mask & (1 << i)]
+            key = ",".join(subset)
+            scope_rows = [r for r in in_rows if r["region"] in subset]
+            out_rows.extend(_ff_period_rows(scope_rows, p, {"region_set": key},
+                                            last_updated, FF_BYREGION_HEADERS))
     return out_rows
 
 
@@ -906,6 +1022,8 @@ def main():
         region_rows = build_tab_rows(raw_rows, periods, "region", last_updated)
         rt_rows = build_tab_rows(raw_rows, periods, "rt", last_updated)
         ff_rows = build_ff_rows(raw_rows, periods, last_updated)
+        ff_region_rows = build_ff_region_rows(raw_rows, periods, last_updated)
+        ff_br_rows = build_ff_byregion_rows(raw_rows, periods, last_updated)
         vin_br_headers, vin_br_rows = build_byregion_rows(raw_rows, periods, "vin", last_updated)
         rt_br_headers, rt_br_rows = build_byregion_rows(raw_rows, periods, "rt", last_updated)
 
@@ -919,6 +1037,8 @@ def main():
             "video_region": (REGION_HEADERS, region_rows),
             "video_rt": (RT_HEADERS, rt_rows),
             "video_ff": (FF_HEADERS, ff_rows),
+            "video_ff_region": (FF_REGION_HEADERS, ff_region_rows),
+            "video_ff_byregion": (FF_BYREGION_HEADERS, ff_br_rows),
             "video_vin_byregion": (vin_br_headers, vin_br_rows),
             "video_rt_byregion": (rt_br_headers, rt_br_rows),
         }
