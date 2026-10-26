@@ -13,16 +13,17 @@ All metrics come from model 1 only (model 2 is not used in this version).
 
 | Metric | Definition |
 |---|---|
-| `sla_pct` | Over the **video population** = verified + rejected + QC-pending videos: share whose QC TAT ≤ **6h**. A video still pending QC 6h after its clock start is a breach; one pending for less than 6h counts as within SLA until its 6h run out. |
+| `sla_pct` | Share of **delivered (verified)** videos with QC TAT ≤ **6h**. SLA total = TAT total. |
 | `p99_tat_hrs`, `p95_tat_hrs` | 99th / 95th percentile of QC TAT over **delivered (verified)** videos. |
-| `fulfillment_pct` | `verified / (verified + rejected + QC-pending) × 100`. `total_videos` / `delivered_videos` are that denominator / numerator. |
-| `sla_checked`, `sla_breached`, `tat_measured`, `tat_over_sla` | Counts behind SLA / TAT for the dashboard tooltips. `sla_checked` = population judged for SLA (equals `total_videos` in every period), `sla_breached` = of those, over 6h or still pending after 6h; `tat_measured` = delivered videos with a TAT (equals `delivered_videos`), `tat_over_sla` = of those, over 6h. On `video_rt` they count **rooftops**. Segment-prefixed copies too. |
+| `fulfillment_pct` | `verified / (verified + rejected + QC-pending-past-6h) × 100`. A QC-pending video within 6h of clock start is **in-flight** — excluded from both numerator and denominator. Once 6h have passed, it's a real shortfall and joins the denominator. `total_videos` / `delivered_videos` are that denominator / numerator. |
+| `sla_checked`, `sla_breached`, `tat_measured`, `tat_over_sla` | Counts behind SLA / TAT for the dashboard tooltips. All four count the delivered-with-TAT population; `sla_breached` / `tat_over_sla` are the ones over 6h. On `video_rt` they count **rooftops**. Segment-prefixed copies too. |
 | `ent_* / mid_* / resellers_* / smb_*` | Same metrics sliced by `customer_segment` (`Ent`, `Mid`, `Resellers`, `SMB`, case-insensitive). |
 
 - **TAT** = QC done time (`qc_updated_on`) − clock start (`Last_Reprocessed_ON`
   when present, else `Created_ON`), in hours.
-- Videos still pending QC count toward fulfillment and, once 6h have passed,
-  as SLA breaches. They have no TAT, so they're not in p99/p95.
+- QC-pending within 6h: in-flight, counted nowhere. QC-pending past 6h: counted
+  in the fulfilment denominator and in `video_ff` as "QC pending (SLA breached)".
+  Neither contributes to p99/p95 (no TAT yet).
 - Empty period/segment cells are written as `0`.
 
 ## Period buckets (by `Created_ON`, ISO week Mon–Sun)

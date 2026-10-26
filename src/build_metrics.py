@@ -15,8 +15,10 @@ Tabs populated (clear + full repopulate each run):
 
 Metric definitions (all from model 1, card 11942; one row per ACTIVE video, Live rooftops
 only - rows from rooftops that aren't Live are dropped, see LIVE_ROOFTOPS_SQL):
-  Population            -> verified + rejected + QC-pending videos (QC-pending =
-                           no qc_done time yet). total_videos and fulfillment_pct use it.
+  Population            -> verified + rejected + QC-pending-past-6h videos.
+                           A QC-pending video within 6h of clock start is still
+                           in-flight and is NOT in the population. total_videos
+                           and fulfillment_pct use this population.
   QC  sla               -> share of delivered (verified) videos with QC TAT <= 6h:
                            the same videos as QC p99 / p95, so SLA total = TAT total.
   QC  p99 / p95         -> TAT = qc_updated_on (qc_done time) - clock start, over
@@ -24,9 +26,10 @@ only - rows from rooftops that aren't Live are dropped, see LIVE_ROOFTOPS_SQL):
   tech sla / p99 / p95  -> TAT = Processing_Done_Time - Created_ON.
                            Rows without a processing done time are skipped.
   SLA met               -> TAT <= 6h (21600s), for both QC and tech.
-  fulfillment_pct       -> verified / (verified + rejected + QC-pending) * 100
-                           over all rows; QC-pending = no qc_done time yet.
-                           Other verified_status values are ignored.
+  fulfillment_pct       -> verified / (verified + rejected + QC-pending-past-6h)
+                           * 100. QC-pending within 6h is excluded from both
+                           numerator and denominator. Other verified_status
+                           values are ignored.
   Segments              -> Ent / Mid / Resellers / SMB, matched case-insensitively
                            on customer_segment.
   p99 / p95 per tab     -> video_vin: pooled over all videos in the period.
@@ -144,6 +147,11 @@ FF_REGION_HEADERS = ["period_type", "period", "region"] + FF_BASE_COLS + ["last_
 # region_set slices for multi-region chip combos, same shape as video_vin_byregion.
 FF_BYREGION_HEADERS = ["period_type", "period", "region_set"] + FF_BASE_COLS + ["last_updated"]
 FF_NO_REASON = "(no reason recorded)"
+# Videos still awaiting QC after 6h count toward fulfilment shortfall but have
+# no rejection reason yet, so they get their own synthetic bucket in video_ff.
+# QC-pending videos still inside the 6h SLA are treated as in-flight and don't
+# show up anywhere.
+FF_QC_PENDING_LABEL = "QC pending (SLA breached)"
 
 # These three raw reasons are merged into one bucket (matched case-insensitively,
 # trimmed). Extend this set if more image-missing variants appear.
@@ -391,8 +399,10 @@ def _sla_p99_p95(tats):
 
 def _fulfillment(rows):
     """
-    verified / (verified + rejected + QC-pending) * 100, or None if the
-    denominator is empty. QC-pending = no qc_done time yet.
+    verified / (verified + rejected + QC-pending past 6h) * 100, or None if the
+    denominator is empty. A QC-pending video still inside the 6h SLA is treated
+    as in-flight and excluded from both numerator and denominator; one that has
+    been pending for over 6h is a real shortfall and counts in the denominator.
     """
     delivered = denom = 0
     for r in rows:
@@ -400,7 +410,7 @@ def _fulfillment(rows):
         if vs == "verified":
             delivered += 1
             denom += 1
-        elif vs == "rejected" or r.get("qc_pending"):
+        elif vs == "rejected" or r.get("qc_pending_breached"):
             denom += 1
     if denom == 0:
         return None
@@ -619,14 +629,21 @@ def prepare_rows(raw_rows, now=None):
             "tech_tat": tat(proc_done, created),
         })
         # Populations (same rule as the image cards):
-        #   in_pop       = verified + rejected + QC-pending  (the fulfillment_pct denominator)
+        #   qc_pending_breached = still awaiting QC AND > 6h since clock start.
+        #                         Within-6h pending is in-flight: excluded everywhere.
+        #   in_pop       = verified + rejected + qc_pending_breached  (fulfillment_pct denominator)
         #   qc_tat_del   = QC TAT of delivered (verified) videos only -> the P95/P99 population
         #   sla_eligible = the same videos as qc_tat_del (SLA total = TAT total)
         #   sla_breach   = of those, QC took over 6h
         row = all_rows[-1]
         vs = str(row["verified_status"] or "").strip().lower()
         row["delivered"] = vs == "verified"
-        row["in_pop"] = row["delivered"] or vs == "rejected" or row["qc_pending"]
+        row["qc_pending_breached"] = (
+            row["qc_pending"]
+            and row["created"] is not None
+            and (now - row["created"]).total_seconds() > SLA_THRESHOLD_SECONDS
+        )
+        row["in_pop"] = row["delivered"] or vs == "rejected" or row["qc_pending_breached"]
         row["qc_tat_del"] = row["qc_tat"] if row["delivered"] else None
         row["sla_eligible"] = row["qc_tat_del"] is not None
         row["sla_breach"] = row["sla_eligible"] and row["qc_tat_del"] > SLA_THRESHOLD_SECONDS
@@ -669,8 +686,8 @@ def build_tab_rows(raw_rows, periods, grain, last_updated, prepared=None):
             m.update(compute_rooftop_counts(all_g) if grain == "rt" else compute_counts(all_g))
 
             # total_videos / delivered_videos = the fulfillment_pct denominator / numerator
-            # (verified + rejected + QC-pending / verified), so the tooltip's Total and
-            # Delivered explain the fulfilment % and line up with the SLA / TAT counts.
+            # (verified + rejected + QC-pending-past-6h / verified), so the tooltip's Total
+            # and Delivered explain the fulfilment % and line up with the SLA / TAT counts.
             total_vids = sum(1 for r in all_g if r["in_pop"])
             delivered_vids = sum(1 for r in all_g if r["delivered"])
             vid_counts = {"total_videos": total_vids,
@@ -759,20 +776,30 @@ def _canon_reason(raw):
     return key, s
 
 
+FF_QC_PENDING_KEY = FF_QC_PENDING_LABEL.lower()
+
+
 def _ff_scope(rows):
     """
-    Count rejection reasons on one scope's rows.
+    Count reasons behind the fulfilment shortfall on one scope's rows: real
+    rejection reasons for rejected videos, plus a synthetic bucket for videos
+    still pending QC after the 6h SLA (same population that _fulfillment adds
+    to the denominator). Within-6h pending videos are in-flight, so they do
+    not appear here.
     Returns (counts {key -> n}, variants {key -> {label -> n}}, denominator).
-    denominator = len(rows), i.e. all created videos in that scope - same rule
-    the overall video_ff has used since the top-3 cap was lifted.
+    denominator = len(rows), i.e. all created videos in that scope.
     """
     counts = defaultdict(int)
     variants = defaultdict(lambda: defaultdict(int))
     for r in rows:
-        if str(r.get("verified_status") or "").strip().lower() == "rejected":
+        vs = str(r.get("verified_status") or "").strip().lower()
+        if vs == "rejected":
             key, label = _canon_reason(r.get("rejected_reason"))
             counts[key] += 1
             variants[key][label] += 1
+        elif r.get("qc_pending_breached"):
+            counts[FF_QC_PENDING_KEY] += 1
+            variants[FF_QC_PENDING_KEY][FF_QC_PENDING_LABEL] += 1
     return counts, variants, len(rows)
 
 
