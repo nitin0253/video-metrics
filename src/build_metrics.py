@@ -173,11 +173,16 @@ FF_NO_REASON = "(no reason recorded)"
 # gets one row per region it actually has videos in. There's no region_set slice here:
 # combining regions can sum the count columns, but P99/P95 can't be recombined from
 # per-region percentiles, so a multi-region drill-down should restrict to one region.
+# sla_checked/sla_breached are the exact counts behind sla_pct/p99_tat_hrs/p95_tat_hrs
+# (sla_checked = delivered videos with a QC TAT = the P99/P95 population too, same
+# "SLA total = TAT total" rule as every other tab; sla_breached = of those, over 6h) --
+# the dashboard derives "not delivered" for Fulfilment as total_videos - delivered_videos
+# rather than a separate column, since that subtraction is exact.
 DUMP_HEADERS = ["period_type", "period", "region", "customer_segment", "enterprise",
                 "reason", "reason_count", "reason_pct",
                 "total_videos", "delivered_videos", "qced_videos", "rejected_videos",
-                "fulfillment_pct", "sla_pct", "p99_tat_hrs", "p95_tat_hrs",
-                "last_updated"]
+                "fulfillment_pct", "sla_pct", "sla_checked", "sla_breached",
+                "p99_tat_hrs", "p95_tat_hrs", "last_updated"]
 # Sentinel reason for an enterprise/region/period with zero rejections and zero
 # breached-pending (nothing to break down) -- still gets one row, so the Fulfilment /
 # SLA / P99 / P95 drill-downs can find it even when it has no Gap Reasons bar at all.
@@ -1002,6 +1007,7 @@ def build_dump_rows(raw_rows, periods, last_updated, prepared=None):
             qced_videos = delivered_videos + rejected_videos
             seg = next((r["seg"] for r in rows if r["seg"]), "") or ""
             m = compute_group_metrics_raw(rows)
+            c = _count_block(rows)
             base = {
                 "period_type": p["period_type"], "period": p["period_label"],
                 "region": region, "customer_segment": seg, "enterprise": ent,
@@ -1009,6 +1015,7 @@ def build_dump_rows(raw_rows, periods, last_updated, prepared=None):
                 "qced_videos": qced_videos, "rejected_videos": rejected_videos,
                 "fulfillment_pct": m.get("fulfillment_pct") or 0,
                 "sla_pct": m.get("sla_pct") or 0,
+                "sla_checked": c["sla_checked"], "sla_breached": c["sla_breached"],
                 "p99_tat_hrs": m.get("p99_tat_hrs") or 0,
                 "p95_tat_hrs": m.get("p95_tat_hrs") or 0,
                 "last_updated": last_updated,
