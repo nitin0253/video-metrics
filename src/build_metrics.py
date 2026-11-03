@@ -86,7 +86,7 @@ INNER JOIN (
     SELECT enterprise_id, name FROM eventila.enterprise_details FINAL
     WHERE _peerdb_is_deleted = 0 AND stage = 'Live' AND is_active AND ifNull(is_test_account, 0) = 0
 ) AS e ON e.enterprise_id = t.enterprise_id
-LEFT JOIN eventila.enterprise_account FINAL AS ea ON ea.enterprise_id = t.enterprise_id
+LEFT JOIN eventila.enterprise_account AS ea FINAL ON ea.enterprise_id = t.enterprise_id
 WHERE t._peerdb_is_deleted = 0 AND t.stage = 'Live' AND t.is_active AND ifNull(t.is_test_account, 0) = 0
 """
 
