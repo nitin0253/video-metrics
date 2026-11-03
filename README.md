@@ -41,6 +41,7 @@ Each tab holds **9** buckets per grain: 4 completed weekly + 4 completed monthly
 | `video_ff` | overall | one row per (period, reason); each row carries overall `count`/`pct` **and** `ent_count`/`ent_pct`, `mid_*`, `resellers_*`, `smb_*` so the dashboard's segment chip rescopes the card by picking a different column pair - each pct is over its own scope's row count. |
 | `video_ff_region` | per `region` | `video_ff` sliced per region: one row per (period, region, reason). Follows the dashboard's region chip when a single region is selected. |
 | `video_ff_byregion` | per `region_set` | `video_ff` sliced per region subset: one row per (period, region_set, reason). Same `region_set` key as `video_vin_byregion` / `video_rt_byregion`, so a multi-region chip combo looks the card up the same way. |
+| `video_dump` | per (`region`, `enterprise`) | One row per (period, region, enterprise, reason). `reason_count`/`reason_pct` are that reason's share of this one enterprise (same definition as `video_ff`, scoped to one enterprise) — the dashboard's Fulfilment Gap Reasons drill-down filters period+region+`customer_segment`+reason and lists what's left by `enterprise`. `total_videos`/`delivered_videos`/`qced_videos`/`rejected_videos` and `fulfillment_pct`/`sla_pct`/`p99_tat_hrs`/`p95_tat_hrs` are the enterprise's own metrics for that period+region and repeat across every reason row of that enterprise, so a Fulfilment / SLA / P99 / P95 drill-down is the same filter with reason left out (or `reason=""`, the sentinel for an enterprise with nothing to break down — zero rejections and zero breached-pending in that period+region). `customer_segment` is the enterprise's own tier, carried as an attribute (an enterprise is in exactly one segment), not a separate grouping axis. `region` is per-rooftop, so an enterprise with Live rooftops in more than one region gets one row per region it actually has videos in — there's no `region_set` slice: combining regions can sum the count columns, but P99/P95 can't be recombined from per-region percentiles, so a multi-region drill-down should stay to one region at a time. `enterprise` comes from `eventila.enterprise_details.name` (falling back to `enterprise_account.name`), joined by `Team_ID` off the same Live-rooftop lookup as `LIVE_ROOFTOPS_SQL` — model 1 itself carries no enterprise name/link. |
 
 Each metric tab is **cleared and fully repopulated** every run.
 
@@ -50,7 +51,8 @@ Each metric tab is **cleared and fully repopulated** every run.
 ### `run_log` tab
 Every run appends one row (created automatically if missing, never cleared):
 `run_time` (IST), `status` (success / failure / dry-run), `rows_fetched`,
-`video_vin_rows`, `video_region_rows`, `video_rt_rows`, `duration_sec`, `error`.
+`video_vin_rows`, `video_region_rows`, `video_rt_rows`, `video_ff_rows`,
+`video_dump_rows`, `duration_sec`, `error`.
 Failures are logged too (with the error message) and still mark the GitHub
 Action as failed.
 
