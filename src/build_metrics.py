@@ -74,19 +74,14 @@ CLICKHOUSE_DB_ID = int(os.environ.get("METABASE_CLICKHOUSE_DB_ID", "350"))
 
 # Population (same rule as the Images cards): only videos from Live, active, non-test
 # rooftops inside Live, active, non-test enterprises. Card 11942 filters enterprises but
-# not rooftops, so its rows are filtered here against this list. Also carries the
-# enterprise name per rooftop (video_dump's "enterprise" column) - enterprise_details.name,
-# falling back to enterprise_account.name (same COALESCE the QC reporting cards use), since
-# model 1 itself has no enterprise name/link.
+# not rooftops, so its rows are filtered here against this list.
 LIVE_ROOFTOPS_SQL = """
-SELECT t.team_id AS team_id,
-       COALESCE(e.name, ea.name) AS enterprise_name
+SELECT t.team_id AS team_id
 FROM eventila.enterprise_team_details AS t FINAL
 INNER JOIN (
-    SELECT enterprise_id, name FROM eventila.enterprise_details FINAL
+    SELECT enterprise_id FROM eventila.enterprise_details FINAL
     WHERE _peerdb_is_deleted = 0 AND stage = 'Live' AND is_active AND ifNull(is_test_account, 0) = 0
 ) AS e ON e.enterprise_id = t.enterprise_id
-LEFT JOIN eventila.enterprise_account AS ea FINAL ON ea.enterprise_id = t.enterprise_id
 WHERE t._peerdb_is_deleted = 0 AND t.stage = 'Live' AND t.is_active AND ifNull(t.is_test_account, 0) = 0
 """
 
@@ -276,10 +271,7 @@ def fetch_card_rows(base_url, session_id, card_id, max_attempts=4):
 
 def fetch_live_rooftops(base_url, session_id):
     """
-    Return (team_ids, team_enterprise):
-      team_ids        = set of Live rooftop (team) ids (unchanged contract).
-      team_enterprise = {team_id: enterprise_name}, for video_dump's "enterprise"
-                        column (prepare_rows attaches it per row by team_id).
+    Return the set of Live rooftop (team) ids.
 
     Uses Metabase's export endpoint (/api/dataset/json): /api/dataset caps results at
     2,000 rows, and there are already ~1,720 Live rooftops. The query must be sent
@@ -302,10 +294,7 @@ def fetch_live_rooftops(base_url, session_id):
     # the export endpoint returns a plain list of row objects on success (status 200 or 202)
     if resp.status_code not in (200, 202) or not isinstance(rows, list) or not rows:
         raise RuntimeError(f"Live rooftop lookup failed ({resp.status_code}): {resp.text[:2000]}")
-    team_ids = {str(r["team_id"]) for r in rows if r.get("team_id")}
-    team_enterprise = {str(r["team_id"]): str(r.get("enterprise_name") or "").strip()
-                        for r in rows if r.get("team_id")}
-    return team_ids, team_enterprise
+    return {str(r["team_id"]) for r in rows if r.get("team_id")}
 
 
 # ----------------------------------------------------------------------------
@@ -616,7 +605,7 @@ def compute_rooftop_counts(rows):
     return out
 
 
-def prepare_rows(raw_rows, now=None, team_enterprise=None):
+def prepare_rows(raw_rows, now=None):
     """
     Normalize raw model-1 rows (one per active video) into a compact form.
     Each row carries: created, seg, region, team_id, team_name, enterprise,
@@ -628,9 +617,6 @@ def prepare_rows(raw_rows, now=None, team_enterprise=None):
     at the reprocess time and lands in the period bucket of its reprocess
     date. Negative or missing TATs are None, so the row is skipped for that
     metric.
-
-    team_enterprise: optional {team_id: enterprise_name} (from fetch_live_rooftops)
-    used to attach "enterprise" - model 1 has no enterprise name/link of its own.
     """
     def getv(row, *names):
         """Return the first present, non-empty value among candidate key names."""
@@ -660,15 +646,17 @@ def prepare_rows(raw_rows, now=None, team_enterprise=None):
         qc_done = parse_dt(getv(r, "qc_updated_on", "Qc Updated On", "QC Updated On"))
         proc_done = parse_dt(getv(r, "Processing_Done_Time", "Processing Done Time",
                                   "processing_done_time"))
-        team_id = getv(r, "Team_ID", "team_id")
         all_rows.append({
             "created": created,
             "seg": seg_key(r),
             "region": (str(getv(r, "region", "Region")).strip()
                        if getv(r, "region", "Region") is not None else "Unknown"),
-            "team_id": team_id,
+            "team_id": getv(r, "Team_ID", "team_id"),
             "team_name": getv(r, "Team_Name", "team_name"),
-            "enterprise": (team_enterprise or {}).get(str(team_id or ""), ""),
+            # model 1 carries the enterprise name directly (Ent_Name) - no ClickHouse
+            # lookup needed.
+            "enterprise": (str(getv(r, "Ent_Name", "ent_name")).strip()
+                           if getv(r, "Ent_Name", "ent_name") is not None else ""),
             "verified_status": getv(r, "verified_status", "Verified_Status"),
             "vin": (str(getv(r, "VIN", "vin")).strip()
                     if getv(r, "VIN", "vin") is not None else None),
@@ -987,9 +975,9 @@ def build_dump_rows(raw_rows, periods, last_updated, prepared=None):
     Fulfilment Gap Reasons -> enterprise breakdown, plus per-enterprise Fulfilment /
     SLA / P99 / P95 (see the DUMP_HEADERS comment for the exact row shape).
 
-    Rows with no enterprise (team_id not resolved to a Live enterprise - shouldn't
-    happen since raw_rows is already Live-rooftop filtered, but just in case) are
-    skipped rather than lumped into one "(blank)" bucket.
+    Rows with no Ent_Name (shouldn't happen since raw_rows is already Live-rooftop
+    filtered, but just in case) are skipped rather than lumped into one "(blank)"
+    bucket.
     """
     all_rows_all = prepared if prepared is not None else prepare_rows(raw_rows)
 
@@ -1140,7 +1128,7 @@ def main():
         print(f"  {len(raw_rows)} rows")
 
         # Live rooftops only (see LIVE_ROOFTOPS_SQL)
-        live_rooftops, team_enterprise = fetch_live_rooftops(base_url, session_id)
+        live_rooftops = fetch_live_rooftops(base_url, session_id)
         before = len(raw_rows)
         raw_rows = [r for r in raw_rows
                     if str(r.get("Team_ID") or r.get("team_id") or "") in live_rooftops]
@@ -1164,11 +1152,7 @@ def main():
         ff_br_rows = build_ff_byregion_rows(raw_rows, periods, last_updated)
         vin_br_headers, vin_br_rows = build_byregion_rows(raw_rows, periods, "vin", last_updated)
         rt_br_headers, rt_br_rows = build_byregion_rows(raw_rows, periods, "rt", last_updated)
-        # Only this tab needs the enterprise name per row, so it's the only call that
-        # pays for a second prepare_rows pass (team_enterprise isn't threaded through
-        # the shared raw_rows-based calls above).
-        dump_prepared = prepare_rows(raw_rows, team_enterprise=team_enterprise)
-        dump_rows = build_dump_rows(raw_rows, periods, last_updated, prepared=dump_prepared)
+        dump_rows = build_dump_rows(raw_rows, periods, last_updated)
 
         log["video_vin_rows"] = len(vin_rows)
         log["video_region_rows"] = len(region_rows)
