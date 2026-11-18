@@ -244,6 +244,7 @@ def fetch_card_rows(base_url, session_id, card_id, max_attempts=4):
             resp = requests.post(
                 f"{base_url}/api/card/{card_id}/query/json",
                 headers={"X-Metabase-Session": session_id},
+                params={"ignore_cache": "true"},
                 timeout=600,
             )
         except requests.exceptions.RequestException as e:
