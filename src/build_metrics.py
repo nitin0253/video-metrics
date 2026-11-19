@@ -689,7 +689,15 @@ def prepare_rows(raw_rows, now=None):
         #   sla_breach   = of those, QC took over 6h
         row = all_rows[-1]
         vs = str(row["verified_status"] or "").strip().lower()
-        row["delivered"] = vs == "verified"
+        crm = str(row["crm_status"] or "").strip().lower()
+        # Rooftops with QC disabled for this product auto-close videos straight
+        # to crm_status 'qc_done' without ever setting verified_status - treat
+        # those as delivered (or rejected, if verified_status says so) instead
+        # of counting them as stuck QC-pending forever.
+        auto_qc_done = crm == "qc_done" and vs != "rejected"
+        if auto_qc_done:
+            row["qc_pending"] = False
+        row["delivered"] = vs == "verified" or (auto_qc_done and vs == "")
         row["qc_pending_breached"] = (
             row["qc_pending"]
             and row["created"] is not None
